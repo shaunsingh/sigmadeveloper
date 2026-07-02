@@ -25,6 +25,13 @@ final class LibraryStore {
 
     init() {
         Paths.resetSession()
+        // decode cache holds proxy but we can drop them for mem pressure
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main
+        ) { [engine] _ in
+            engine.releaseCache()
+        }
     }
 
     // MARK: - Import
@@ -36,16 +43,17 @@ final class LibraryStore {
         let sources = await Self.expand(urls)
         guard !sources.isEmpty else { return }
 
-        var fresh: [LibraryItem] = []
         let defaults = self.defaults
+        var inserted = 0
         for (i, src) in sources.enumerated() {
             importProgress = (i + 1, sources.count)
-            if let item = await Self.importOne(src, defaults: defaults) { fresh.append(item) }
+            guard let item = await Self.importOne(src, defaults: defaults) else { continue }
+            // item stream
+            items.insert(item, at: inserted)
+            inserted += 1
+            itemIDs.insert(item.id)
+            ensureThumbnail(item)
         }
-        guard !fresh.isEmpty else { return }
-        items.insert(contentsOf: fresh, at: 0)
-        itemIDs.formUnion(fresh.lazy.map(\.id))
-        for item in fresh { ensureThumbnail(item) }
     }
 
     private nonisolated static func expand(_ urls: [URL]) async -> [URL] {
@@ -98,7 +106,12 @@ final class LibraryStore {
         let key = defaults.globalKey
         for i in items.indices where !items[i].isCustomized {
             items[i].settings.globalKey = key
-            if thumbnails[items[i].id] != nil { renderThumbnail(items[i]) }
+            if thumbnails[items[i].id] != nil {
+                renderThumbnail(items[i])
+            } else {
+                // drop stale looks
+                try? Paths.fm.removeItem(at: Paths.thumbnail(items[i].id))
+            }
         }
     }
 
@@ -108,6 +121,7 @@ final class LibraryStore {
         thumbnails[item.id] = nil
         thumbnailLRU.removeAll { $0 == item.id }
         try? Paths.fm.removeItem(at: item.url)
+        try? Paths.fm.removeItem(at: Paths.thumbnail(item.id))
     }
 
     // MARK: - Export
@@ -143,7 +157,18 @@ final class LibraryStore {
 
     func ensureThumbnail(_ item: LibraryItem) {
         guard thumbnails[item.id] == nil else { touchThumbnail(item.id); return }
-        renderThumbnail(item)
+        guard !thumbnailTasks.contains(item.id) else { return }
+        thumbnailTasks.insert(item.id)
+        let id = item.id
+        Task {
+            defer { thumbnailTasks.remove(id) }
+            // check session disk cache first
+            if let cached = await Self.loadThumbnail(id) {
+                if itemIDs.contains(id) { storeThumbnail(cached, for: id) }
+                return
+            }
+            await renderThumbnailNow(item)
+        }
     }
 
     func refreshThumbnail(_ id: UUID) {
@@ -157,23 +182,27 @@ final class LibraryStore {
         Task {
             let thumbnail = await engine.downscale(source, maxDimension: 700)
             guard itemIDs.contains(id) else { return }
-            storeThumbnail(UIImage(cgImage: thumbnail.cgImage), for: id)
+            let image = UIImage(cgImage: thumbnail.cgImage)
+            storeThumbnail(image, for: id)
+            Self.persistThumbnail(image, for: id)
         }
     }
 
     private func renderThumbnail(_ item: LibraryItem) {
         guard !thumbnailTasks.contains(item.id) else { return }
         thumbnailTasks.insert(item.id)
-
-        let url = item.url
-        let settings = item.settings
         Task {
             defer { thumbnailTasks.remove(item.id) }
-            let rendered = try? await engine.thumbnail(url: url, settings: settings, maxDimension: 700)
-            if itemIDs.contains(item.id), let cg = rendered?.cgImage {
-                storeThumbnail(UIImage(cgImage: cg), for: item.id)
-            }
+            await renderThumbnailNow(item)
         }
+    }
+
+    private func renderThumbnailNow(_ item: LibraryItem) async {
+        let rendered = try? await engine.thumbnail(url: item.url, settings: item.settings, maxDimension: 700)
+        guard itemIDs.contains(item.id), let cg = rendered?.cgImage else { return }
+        let image = UIImage(cgImage: cg)
+        storeThumbnail(image, for: item.id)
+        Self.persistThumbnail(image, for: item.id)
     }
 
     private func storeThumbnail(_ image: UIImage, for id: UUID) {
@@ -183,6 +212,21 @@ final class LibraryStore {
             thumbnailLRU.removeFirst()
             thumbnails[coldest] = nil
         }
+    }
+
+    nonisolated private static func persistThumbnail(_ image: UIImage, for id: UUID) {
+        Task.detached(priority: .utility) {
+            guard let data = image.jpegData(compressionQuality: 0.85) else { return }
+            try? data.write(to: Paths.thumbnail(id), options: .atomic)
+        }
+    }
+
+    nonisolated private static func loadThumbnail(_ id: UUID) async -> UIImage? {
+        let path = Paths.thumbnail(id).path
+        return await Task.detached(priority: .utility) {
+            // Decode off-main so the first draw doesn't pay it.
+            UIImage(contentsOfFile: path)?.preparingForDisplay()
+        }.value
     }
 
     private func touchThumbnail(_ id: UUID) {

@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import SigmaFoveon
+import os
 
 /// A `CGImage` ferried across concurrency domains. `CGImage` is immutable and
 /// thread-safe; the wrapper just satisfies `Sendable` checking.
@@ -15,20 +16,25 @@ struct RenderedImage: @unchecked Sendable {
 /// Bridges SwiftUI to FoveonDeveloper
 final class RenderEngine: @unchecked Sendable {
     private let developer = FoveonDeveloper()
-    // `.default`, not `.userInitiated`: the Rust decoder spawns its own worker pool
-    // at default QoS and parks the calling thread on it. A higher-QoS queue here
-    // would make a user-initiated thread wait on default-QoS workers — a priority
-    // inversion the runtime flags as a hang risk. Matching QoS avoids the inversion.
+    // handle QoS properly or else XCode gets made at me
     private let queue = DispatchQueue(label: "global.sigma.render", qos: .default)
+    /// Thumbnails queue
+    private let thumbnailQueue = DispatchQueue(label: "global.sigma.render.thumbnails", qos: .utility)
 
-    private var decodeKey: String?
-    private var decoded: DecodedRaw?
+    private struct DecodeKey: Equatable, Sendable {
+        let path: String
+        /// preview proxy decodes
+        let proxy: Bool
+    }
+    /// Tiny MRU cache for decode
+    private let decodeCache = OSAllocatedUnfairLock<[(key: DecodeKey, raw: DecodedRaw)]>(initialState: [])
+    private static let decodeCacheCap = 3
 
     private var developKey: DevelopKey?
     private var developed: DevelopedImage?
 
     private struct DevelopKey: Equatable {
-        let decode: String
+        let decode: DecodeKey
         let exposure: Float
         let autoTone: Bool
         let autoExposureMode: AutoExposureMode?
@@ -43,18 +49,15 @@ final class RenderEngine: @unchecked Sendable {
     }
 
     /// Small grid thumbnail, developed with `settings` so the gallery matches the
-    /// editor and the export. Decodes straight through rather than via the preview
-    /// cache: every grid cell is a different file, so caching here would only evict
-    /// the active viewer's decode.
+    /// editor and the export.
     func thumbnail(url: URL, settings: DevelopSettings, maxDimension: Int) async throws -> RenderedImage {
-        try await run {
+        try await run(on: thumbnailQueue) {
             var options = settings.foveonOptions()
-            // Wavelet is cheap enough for grid cells and keeps them matching the
-            // editor; neural (seconds per image) stays editor/export-only.
+            // only allow wavelet
             if options.denoise == .neural { options.denoise = .off }
             options.hdr = false // sdr only preview thumbnails
-            // Half-res Rust proxy: a 700px thumbnail never needs the full 4.7MP develop.
-            let decoded = try self.developer.decode(file: url, proxy: true)
+            // Proxy decodes
+            let decoded = try self.decodeCached(url: url, proxy: true)
             guard let cg = self.developer.previewImage(decoded, options: options,
                                                        maxDimension: maxDimension) else {
                 throw FoveonError.render("thumbnail render returned nil")
@@ -66,7 +69,7 @@ final class RenderEngine: @unchecked Sendable {
 
     func downscale(_ image: RenderedImage, maxDimension: Int) async -> RenderedImage {
         await withCheckedContinuation { continuation in
-            queue.async {
+            thumbnailQueue.async {
                 continuation.resume(returning: RenderedImage(cgImage: Self.resample(image.cgImage, to: maxDimension)))
             }
         }
@@ -78,7 +81,9 @@ final class RenderEngine: @unchecked Sendable {
     func preview(url: URL, settings: DevelopSettings, maxDimension: Int?) async throws -> RenderedImage {
         try await run {
             let options = settings.foveonOptions()
-            let developed = try self.developCached(url: url, options: options)
+            // Camera RAW edits from the rasterised proxy
+            let developed = try self.developCached(url: url, options: options,
+                                                   proxy: Self.isProxyPreviewed(url))
             guard let cg = self.developer.previewImage(developed, options: options,
                                                        maxDimension: maxDimension) else {
                 throw FoveonError.render("preview render returned nil")
@@ -122,10 +127,10 @@ final class RenderEngine: @unchecked Sendable {
         }
     }
 
-    /// Drop the cached decode + denoise (e.g. when leaving a viewer) to free buffers.
+    /// Drop the cached decodes + denoise when leaving a viewer or udnder mem pressure
     func releaseCache() {
+        decodeCache.withLock { $0.removeAll() }
         queue.async {
-            self.decodeKey = nil; self.decoded = nil
             self.developKey = nil; self.developed = nil
             self.developer.releaseTransientResources()
         }
@@ -133,21 +138,33 @@ final class RenderEngine: @unchecked Sendable {
 
     // MARK: -
 
-    /// Must run on `queue`; the cache is single-threaded by construction
-    private func decodeCached(url: URL) throws -> DecodedRaw {
-        let key = decodeIdentity(url: url)
-        if decodeKey == key, let decoded { return decoded }
-        let fresh = try developer.decode(file: url)
-        decodeKey = key
-        decoded = fresh
+    private func decodeCached(url: URL, proxy: Bool) throws -> DecodedRaw {
+        let key = DecodeKey(path: url.path, proxy: proxy)
+        // Any earlier decode of the same file provides scene analysis
+        let (hit, donor) = decodeCache.withLock { cache -> (DecodedRaw?, DecodedRaw?) in
+            if let i = cache.firstIndex(where: { $0.key == key }) {
+                let entry = cache.remove(at: i)
+                cache.append(entry)
+                return (entry.raw, nil)
+            }
+            return (nil, cache.last(where: { $0.key.path == url.path })?.raw)
+        }
+        if let hit { return hit }
+        // Decode outside the lock.
+        let fresh = try developer.decode(file: url, proxy: proxy, reusing: donor)
+        decodeCache.withLock { cache in
+            cache.removeAll { $0.key == key }
+            cache.append((key, fresh))
+            if cache.count > Self.decodeCacheCap { cache.removeFirst() }
+        }
         return fresh
     }
 
-    private func developCached(url: URL, options: FoveonOptions) throws -> DevelopedImage {
-        let raw = try decodeCached(url: url)
+    private func developCached(url: URL, options: FoveonOptions, proxy: Bool) throws -> DevelopedImage {
+        let raw = try decodeCached(url: url, proxy: proxy)
         let keyMeter = options.autoTone && options.autoExposureMode == .key
         let key = DevelopKey(
-            decode: decodeIdentity(url: url),
+            decode: DecodeKey(path: url.path, proxy: proxy),
             exposure: options.exposure, autoTone: options.autoTone,
             autoExposureMode: options.autoTone ? options.autoExposureMode : nil,
             toneKey: keyMeter ? options.toneKey : nil,
@@ -165,8 +182,9 @@ final class RenderEngine: @unchecked Sendable {
         return fresh
     }
 
-    private func decodeIdentity(url: URL) -> String {
-        url.path
+    /// The editor previews non-X3F camera RAW from a proxy decode
+    private static func isProxyPreviewed(_ url: URL) -> Bool {
+        url.pathExtension.lowercased() != "x3f"
     }
 
     private func exportData(url: URL, settings: DevelopSettings, format: ExportFormat) throws -> Data {
@@ -175,11 +193,17 @@ final class RenderEngine: @unchecked Sendable {
         case .dng:
             return try developer.render(x3f: try Data(contentsOf: url), to: .dng, options: options)
         case .tiff:
-            return try developer.encode(decodeCached(url: url), as: .tiff, options: options)
+            return try developer.encode(decodeCached(url: url, proxy: false), as: .tiff, options: options)
         case .heic, .jpeg:
-            let developed = try developCached(url: url, options: options)
-            return try developer.encode(developer.finish(developed, options: options),
-                                        as: format.outputFormat, quality: options.quality)
+            guard Self.isProxyPreviewed(url) else {
+                // X3F previews develop full-res, so the export reuses that work
+                let developed = try developCached(url: url, options: options, proxy: false)
+                return try developer.encode(developer.finish(developed, options: options),
+                                            as: format.outputFormat, quality: options.quality)
+            }
+            // Camera RAW re-develops from the lazy full res graph
+            return try developer.encode(decodeCached(url: url, proxy: false),
+                                        as: format.outputFormat, options: options)
         }
     }
 
@@ -206,9 +230,10 @@ final class RenderEngine: @unchecked Sendable {
         return context.makeImage() ?? image
     }
 
-    private func run<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+    private func run<T: Sendable>(on queue: DispatchQueue? = nil,
+                                  _ work: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { cont in
-            queue.async { cont.resume(with: Result { try work() }) }
+            (queue ?? self.queue).async { cont.resume(with: Result { try work() }) }
         }
     }
 }

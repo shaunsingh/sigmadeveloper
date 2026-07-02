@@ -8,6 +8,11 @@ enum Paths {
     }
     static var originals: URL { sessionRoot.appendingPathComponent("Originals", isDirectory: true) }
     static var exports: URL { sessionRoot.appendingPathComponent("Exports", isDirectory: true) }
+    static var thumbnails: URL { sessionRoot.appendingPathComponent("Thumbnails", isDirectory: true) }
+
+    static func thumbnail(_ id: UUID) -> URL {
+        thumbnails.appendingPathComponent("\(id.uuidString).jpg")
+    }
 
     private static var legacyDocuments: URL {
         fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -25,6 +30,7 @@ enum Paths {
     static func ensureDirectories() {
         try? fm.createDirectory(at: originals, withIntermediateDirectories: true)
         try? fm.createDirectory(at: exports, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: thumbnails, withIntermediateDirectories: true)
     }
 
     static func exportURL(stem: String, fileExtension: String) -> URL {

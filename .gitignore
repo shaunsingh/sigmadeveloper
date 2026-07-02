@@ -30,8 +30,8 @@ testx3f/
 __pycache__/
 *.pyc
 
-# Metal
 *.metallib
+!develop/Sources/SigmaFoveon/Resources/*.metallib
 
 # images
 dataset/

@@ -1,5 +1,6 @@
 import CoreImage
 import Foundation
+import ImageIO
 import Metal
 import os
 
@@ -169,8 +170,15 @@ public final class FoveonDeveloper: @unchecked Sendable {
     @discardableResult
     public func process(_ jobs: [FoveonJob], maxConcurrent: Int? = nil,
                         onProgress: (@Sendable (Int, Int) -> Void)? = nil) async -> [Result<Void, Error>] {
-        let defaultLimit = jobs.contains { $0.options.denoise == .neural }
-            ? 1 : ProcessInfo.processInfo.activeProcessorCount
+        let defaultLimit: Int
+        if jobs.contains(where: { $0.options.denoise == .neural }) {
+            defaultLimit = 1
+        } else if jobs.contains(where: { FoveonDeveloper.isRAW($0.input) }) {
+            // CIRAW is GPU/ANE/Mem bound so 2-wide is fine 
+            defaultLimit = 2
+        } else {
+            defaultLimit = ProcessInfo.processInfo.activeProcessorCount
+        }
         let limit = max(1, maxConcurrent ?? defaultLimit)
         var results = [Result<Void, Error>?](repeating: nil, count: jobs.count)
 
@@ -280,24 +288,92 @@ public final class FoveonDeveloper: @unchecked Sendable {
         "raf", "rw2", "orf", "pef", "raw", "rwl", "dcr", "kdc", "mrw", "3fr", "fff",
     ]
 
+    static func isRAW(_ url: URL) -> Bool {
+        rawExtensions.contains(url.pathExtension.lowercased())
+    }
+
+    /// A configured RAW9 demosaic filter for `url`.
+    private func rawFilter(_ url: URL) throws -> CIRAWFilter {
+        guard let filter = CIRAWFilter(imageURL: url) else {
+            throw FoveonError.badInput("could not decode RAW: \(url.lastPathComponent)")
+        }
+        // Use Raw9
+        if let newest = filter.supportedDecoderVersions
+            .max(by: { decoderRank($0) < decoderRank($1) }) {
+            filter.decoderVersion = newest
+        }
+        // Embedded DNG opcode / maker profiles (distortion, CA, vignette)
+        if filter.isLensCorrectionSupported { filter.isLensCorrectionEnabled = true }
+        // Decode with full highlight headroom
+        filter.extendedDynamicRangeAmount = 2
+        return filter
+    }
+
+    /// MARK - Fable
+
+    /// Demosaic `url` capped to `maxDimension` and rasterise the result once.
+    /// A lazy `CIRAWFilter` graph re-runs the whole RAW9 pipeline on every render
+    /// (hundreds of ms to seconds); the concrete scene-linear bitmap this returns
+    /// makes scene analysis and every finishing pass a milliseconds-scale read.
+    /// - Returns: the bitmap-backed image and its scale relative to the native decode.
+    func rawProxy(_ url: URL, maxDimension: CGFloat) throws -> (image: CIImage, nativeScale: Float) {
+        let filter = try rawFilter(url)
+        // `scaleFactor` constraints on the RAW9 pipeline:
+        //  * it must be set before anything materialises the filter's decode graph —
+        //    even reading `nativeSize` freezes it, after which a scale change only
+        //    reshapes the extent and the render comes back as a crop;
+        //  * only power-of-two factors decode correctly (arbitrary ones crop too).
+        // So the native size comes from ImageIO metadata, and we halve down to the
+        // smallest size that still covers `maxDimension`.
+        let longest = nativeLongEdge(url)
+        var scale: CGFloat = 1
+        while let longest, longest * scale * 0.5 >= maxDimension { scale *= 0.5 }
+        if scale < 1 { filter.scaleFactor = Float(scale) }
+        guard let image = filter.outputImage else {
+            throw FoveonError.badInput("could not decode RAW: \(url.lastPathComponent)")
+        }
+        // Fold the remaining pow2→target downscale into the same render.
+        let (bitmap, extra) = try rasterizedProxy(image, maxDimension: maxDimension)
+        return (bitmap, Float(scale) * extra)
+    }
+
+    /// Downscale (when needed) and rasterise a decodable image in one render, so
+    /// interactive passes read a concrete bitmap instead of re-decoding the source.
+    /// - Returns: the bitmap-backed image and its scale relative to the input.
+    func rasterizedProxy(_ image: CIImage, maxDimension: CGFloat) throws -> (image: CIImage, nativeScale: Float) {
+        var scaled = image
+        var scale: CGFloat = 1
+        let longest = max(image.extent.width, image.extent.height)
+        if longest > maxDimension {
+            scale = maxDimension / longest
+            scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        // `deferred: false` forces the decode now; the default overload sometimes
+        // hands back a lazily-backed CGImage that would re-decode on first use.
+        guard let bitmap = context.createCGImage(scaled, from: scaled.extent.integral, format: .RGBAh,
+                                                 colorSpace: extendedLinearSRGB, deferred: false) else {
+            throw FoveonError.render("proxy rasterise failed")
+        }
+        return (CIImage(cgImage: bitmap), Float(scale))
+    }
+
+    /// Native long-edge pixel count from ImageIO metadata (primary image), read
+    /// without constructing a decode graph. nil when the container hides it.
+    private func nativeLongEdge(_ url: URL) -> CGFloat? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let index = CGImageSourceGetPrimaryImageIndex(source)
+        guard let props = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+              let w = (props[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let h = (props[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue else { return nil }
+        return CGFloat(max(w, h))
+    }
+
     /// Load any decoded image into a scene-linear `CIImage` for the finishing graph.
     /// RAW/DNG demosaic through `CIRAWFilter`; other files honour their embedded
     /// profile, falling back to scene-linear for our untagged f16 TIFF intermediate.
     func loadLinear(_ url: URL) throws -> CIImage {
-        if FoveonDeveloper.rawExtensions.contains(url.pathExtension.lowercased()) {
-            guard let filter = CIRAWFilter(imageURL: url) else {
-                throw FoveonError.badInput("could not decode RAW: \(url.lastPathComponent)")
-            }
-            // Use Raw9
-            if let newest = filter.supportedDecoderVersions
-                .max(by: { decoderRank($0) < decoderRank($1) }) {
-                filter.decoderVersion = newest
-            }
-            // Embedded DNG opcode / maker profiles (distortion, CA, vignette)
-            if filter.isLensCorrectionSupported { filter.isLensCorrectionEnabled = true }
-            // Decode with full highlight headroom
-            filter.extendedDynamicRangeAmount = 2
-            guard let image = filter.outputImage else {
+        if FoveonDeveloper.isRAW(url) {
+            guard let image = try rawFilter(url).outputImage else {
                 throw FoveonError.badInput("could not decode RAW: \(url.lastPathComponent)")
             }
             return image

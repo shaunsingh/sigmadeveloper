@@ -33,10 +33,11 @@ struct DevelopControls: View {
             }
             .disabled(settings.hdr)
 
-            Divider()
+            if settings.autoTone {
+                Divider()
 
-            AutoExposureModeControl(mode: $settings.autoExposureMode)
-                .disabled(!settings.autoTone)
+                AutoExposureModeControl(mode: $settings.autoExposureMode)
+            }
 
             Divider()
 
@@ -238,8 +239,8 @@ private struct AutoExposureModeControl: View {
 
     private var caption: String {
         switch mode {
-        case .ettr: "Highlights"
-        case .key: "Mid-grey"
+        case .ettr: "{ETTR}"
+        case .key: "{Key}"
         }
     }
 }
@@ -247,8 +248,8 @@ private struct AutoExposureModeControl: View {
 private extension AutoExposureMode {
     var label: String {
         switch self {
-        case .ettr: "ETTR"
-        case .key: "Key"
+        case .ettr: "Highlights"
+        case .key: "Mid-Grey"
         }
     }
 }

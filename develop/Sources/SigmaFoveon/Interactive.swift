@@ -26,6 +26,8 @@ public struct DecodedRaw: @unchecked Sendable {
     let lens: LensCorrection?
     /// image iso
     public let iso: Float
+    /// Decoded pixels per native pixel
+    public let nativeScale: Float
 }
 
 public struct DevelopedImage: @unchecked Sendable {
@@ -38,7 +40,11 @@ public struct DevelopedImage: @unchecked Sendable {
     let wbNeutral: SIMD3<Float>?
     let monoWeights: SIMD3<Float>?
     let lens: LensCorrection?
+    let nativeScale: Float
 }
+
+/// Proxy cap for interactive decodes
+let proxyMaxDimension: CGFloat = 2560
 
 extension FoveonDeveloper {
 
@@ -50,19 +56,29 @@ extension FoveonDeveloper {
         ]) else { throw FoveonError.render("could not load developed TIFF") }
         return DecodedRaw(image: image, width: raw.width, height: raw.height, isX3F: true,
                           tiffData: proxy ? nil : raw.data, stats: analyzeScene(of: image),
-                          monoWeights: raw.monoWeights, lens: LensCorrection(raw.lens), iso: raw.iso)
+                          monoWeights: raw.monoWeights, lens: LensCorrection(raw.lens), iso: raw.iso,
+                          nativeScale: proxy ? 0.5 : 1)
     }
 
     /// Decode supported input (x3f / RAW / DNG / TIFF / image) to a reusable scene-linear img
-    public func decode(file url: URL, proxy: Bool = false) throws -> DecodedRaw {
+    /// vars; proxy: decode at reduced size for previews etc, reuseing: an earlier decode of the
+    /// same file w/ cached scene analysis
+    public func decode(file url: URL, proxy: Bool = false, reusing donor: DecodedRaw? = nil) throws -> DecodedRaw {
         if url.pathExtension.lowercased() == "x3f" {
             return try decode(x3f: try Data(contentsOf: url), proxy: proxy)
+        }
+        if proxy, FoveonDeveloper.isRAW(url) {
+            let (image, nativeScale) = try rawProxy(url, maxDimension: proxyMaxDimension)
+            let e = image.extent.integral
+            return DecodedRaw(image: image, width: Int(e.width), height: Int(e.height),
+                              isX3F: false, tiffData: nil, stats: analyzeScene(of: image),
+                              monoWeights: nil, lens: nil, iso: 0, nativeScale: nativeScale)
         }
         let image = try loadLinear(url)
         let e = image.extent.integral
         return DecodedRaw(image: image, width: Int(e.width), height: Int(e.height), isX3F: false,
-                          tiffData: nil, stats: analyzeScene(of: image), monoWeights: nil, lens: nil,
-                          iso: 0)
+                          tiffData: nil, stats: donor?.stats ?? analyzeScene(of: image),
+                          monoWeights: nil, lens: nil, iso: 0, nativeScale: 1)
     }
 
     public func develop(_ decoded: DecodedRaw, options: FoveonOptions = .init()) -> DevelopedImage {
@@ -70,7 +86,8 @@ extension FoveonDeveloper {
         let developed = developLinear(decoded.image, options, isX3F: decoded.isX3F, stats: decoded.stats)
         return DevelopedImage(image: developed.image, width: decoded.width, height: decoded.height,
                               autoExposureEV: developed.autoEV, wbNeutral: decoded.stats?.wbNeutral,
-                              monoWeights: decoded.monoWeights, lens: decoded.lens)
+                              monoWeights: decoded.monoWeights, lens: decoded.lens,
+                              nativeScale: decoded.nativeScale)
     }
 
     public func finish(_ decoded: DecodedRaw, options: FoveonOptions = .init()) -> (sdr: CIImage, hdr: CIImage?) {
@@ -79,7 +96,7 @@ extension FoveonDeveloper {
 
     public func finish(_ developed: DevelopedImage, options: FoveonOptions = .init()) -> (sdr: CIImage, hdr: CIImage?) {
         tone(developed.image, options, monoWeights: developed.monoWeights,
-             wbNeutral: developed.wbNeutral, lens: developed.lens)
+             wbNeutral: developed.wbNeutral, scale: developed.nativeScale, lens: developed.lens)
     }
 
     /// Finish + rasterise to a display `CGImage`, optionally downscaled so the
@@ -91,13 +108,13 @@ extension FoveonDeveloper {
     public func previewImage(_ developed: DevelopedImage, options: FoveonOptions = .init(), maxDimension: Int? = nil) -> CGImage? {
         // Downscale the denoised image before tone-mapping
         var image = developed.image
-        var scale: Float = 1
+        var scale = developed.nativeScale
         if let maxDimension, developed.width > 0, developed.height > 0 {
             let longest = max(developed.width, developed.height)
             if longest > maxDimension {
                 let s = CGFloat(maxDimension) / CGFloat(longest)
                 image = image.transformed(by: CGAffineTransform(scaleX: s, y: s))
-                scale = Float(s)
+                scale *= Float(s)
             }
         }
         let result = tone(image, options, monoWeights: developed.monoWeights,
