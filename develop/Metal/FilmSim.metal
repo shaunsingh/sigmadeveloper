@@ -353,8 +353,11 @@ inline float3 add_grain(int2 ipos, float3 density, float scale, constant FilmSim
     float3 inv_2sq_2 = 1.0 / (2.0 * sigma_sq_2 * g_scale_sq * inv_coord_scale * inv_coord_scale);
 
     float2 seed_offset = float2(fract(float(p.seed) * 0.1337) * 1000.0);
+    // Pixel centres, not corners: (i + 0.5) · scale is the same full-res
+    // coordinate at every render scale, so preview, zoom-tile and export grain
+    // share one lattice (corner sampling drifts by 0.5·(scale−1) px).
     float2 pos = float2x2(float2(0.98006, -0.198669), float2(0.198669, 0.98006))
-               * (float2(ipos) * scale * inv_coord_scale + seed_offset);
+               * ((float2(ipos) + 0.5) * scale * inv_coord_scale + seed_offset);
     float2 pf = floor(pos);
     float2 f = fract(pos);
 

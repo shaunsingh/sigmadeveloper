@@ -353,21 +353,17 @@ public final class FoveonDeveloper: @unchecked Sendable {
     func rasterizedProxy(_ image: CIImage, maxDimension: CGFloat) throws -> (image: CIImage, nativeScale: Float) {
         var scaled = image
         var scale: CGFloat = 1
-        var crop = image.extent
         let longest = max(image.extent.width, image.extent.height)
         if longest > maxDimension {
             scale = maxDimension / longest
-            let t = CGAffineTransform(scaleX: scale, y: scale)
-            scaled = image.transformed(by: t)
-            // `transformed` rounds the reported extent outward, so a fractional
-            // scale leaves a partially-covered edge row that rasterises as a
-            // faint dark bar. The exact scaled rect (plain CGRect math) locates
-            // it; its interior is the largest fully-covered pixel grid.
-            crop = image.extent.applying(t).insideIntegral
+            // Integral per-axis scale: no partially-covered edge row (the faint
+            // bar), and the proxy covers the full frame exactly, keeping
+            // deep-zoom tile placement registered (see integralScaleTransform).
+            scaled = image.transformed(by: integralScaleTransform(image.extent, scale: scale))
         }
         // `deferred: false` forces the decode now; the default overload sometimes
         // hands back a lazily-backed CGImage that would re-decode on first use.
-        guard let bitmap = context.createCGImage(scaled, from: crop, format: .RGBAh,
+        guard let bitmap = context.createCGImage(scaled, from: scaled.extent, format: .RGBAh,
                                                  colorSpace: extendedLinearSRGB, deferred: false) else {
             throw FoveonError.render("proxy rasterise failed")
         }

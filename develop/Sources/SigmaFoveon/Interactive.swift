@@ -51,14 +51,14 @@ public struct DevelopedImage: @unchecked Sendable {
 /// Proxy cap for interactive decodes
 let proxyMaxDimension: CGFloat = 2560
 
-extension CGRect {
-    /// The largest integral rect contained in `self` (`integral` rounds outward).
-    var insideIntegral: CGRect {
-        let r = CGRect(x: minX.rounded(.up), y: minY.rounded(.up),
-                       width: maxX.rounded(.down) - minX.rounded(.up),
-                       height: maxY.rounded(.down) - minY.rounded(.up))
-        return r.isEmpty ? .zero : r
-    }
+/// Snap a uniform downscale of `extent` to per-axis factors that land exactly on
+/// integral pixel sizes (≤0.5px aspect skew). A fractional scaled size leaves a
+/// partially-covered edge row — `CIImage` rounds its extent outward — that
+/// rasterises as a faint dark bar; cropping the row away instead misregisters
+/// deep-zoom tiles, which are placed as if the preview covers the full frame.
+func integralScaleTransform(_ extent: CGRect, scale s: CGFloat) -> CGAffineTransform {
+    CGAffineTransform(scaleX: (extent.width * s).rounded() / extent.width,
+                      y: (extent.height * s).rounded() / extent.height)
 }
 
 extension FoveonDeveloper {
@@ -159,11 +159,7 @@ extension FoveonDeveloper {
             // under the 2560 preview cap, so zoom magnifies real pixels).
             if longest > CGFloat(maxDimension) * 5 / 4 {
                 let s = CGFloat(maxDimension) / longest
-                let t = CGAffineTransform(scaleX: s, y: s)
-                // `transformed` rounds the reported extent outward; crop the
-                // partially-covered edge row (a faint bar otherwise) away by
-                // intersecting with the exact scaled rect's interior.
-                image = image.transformed(by: t).cropped(to: image.extent.applying(t).insideIntegral)
+                image = image.transformed(by: integralScaleTransform(image.extent, scale: s))
                 scale *= Float(s)
             }
         }

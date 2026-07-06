@@ -226,7 +226,8 @@ final class FilmSimulation: @unchecked Sendable {
 
     private func run(_ stage: FilmSimStage, _ inputs: [CIImage], _ params: FilmSimParams,
                      _ tables: MTLBuffer, _ extent: CGRect, _ scale: Float) -> CIImage? {
-        let ctx = FilmSimContext(sim: self, params: params, stage: stage, tables: tables, scale: scale)
+        let ctx = FilmSimContext(sim: self, params: params, stage: stage, tables: tables,
+                                 scale: scale, extent: extent)
         return try? FilmSimProcessor.apply(withExtent: extent, inputs: inputs,
                                            arguments: [FilmSimProcessor.contextKey: ctx])
     }
@@ -285,8 +286,11 @@ private final class FilmSimContext {
     let stage: FilmSimStage
     let tables: MTLBuffer
     let scale: Float           // full-res pixels per rendered pixel (grain fidelity)
-    init(sim: FilmSimulation, params: FilmSimParams, stage: FilmSimStage, tables: MTLBuffer, scale: Float) {
-        self.sim = sim; self.params = params; self.stage = stage; self.tables = tables; self.scale = scale
+    let extent: CGRect         // full image extent, to anchor tile origins globally
+    init(sim: FilmSimulation, params: FilmSimParams, stage: FilmSimStage, tables: MTLBuffer,
+         scale: Float, extent: CGRect) {
+        self.sim = sim; self.params = params; self.stage = stage; self.tables = tables
+        self.scale = scale; self.extent = extent
     }
 }
 
@@ -339,8 +343,13 @@ final class FilmSimProcessor: CIImageProcessorKernel {
         enc.setBytes(&params, length: plen, index: 0)
         // Tables were computed once per render (see FilmSimulation.tables(for:)).
         if stage.needsTables { enc.setBuffer(ctx.tables, offset: 0, index: 1) }
-        var tile = FilmSimTile(origin: SIMD2<Int32>(Int32(output.region.origin.x),
-                                                    Int32(output.region.origin.y)),
+        // `output.region` is bottom-up (Core Image space) while `gid` rows count
+        // top-down within the texture; flip the origin so `origin + gid` is one
+        // stable top-down image coordinate — identical whether CI renders the
+        // frame whole, in internal tiles, or as a zoomed region crop. Grain is
+        // seeded from this coordinate, so it must not depend on the tiling.
+        var tile = FilmSimTile(origin: SIMD2<Int32>(Int32((output.region.minX - ctx.extent.minX).rounded()),
+                                                    Int32((ctx.extent.maxY - output.region.maxY).rounded())),
                                scale: ctx.scale)
         enc.setBytes(&tile, length: MemoryLayout<FilmSimTile>.stride, index: 2)
         // 16×8 measured fastest on M4 across the fused/spatial paths
