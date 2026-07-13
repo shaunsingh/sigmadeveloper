@@ -12,10 +12,10 @@ enum SigmaTheme {
 
     static let contentTopInset: CGFloat = 8
 
-    /// Trailing develop column width on wide iOS layouts.
+    /// Trailing develop column width on wide iOS layouts
     static let developSidebarWidth: CGFloat = 340
 
-    /// Shared spring for rail collapse/expand and tray detents.
+    /// Shared spring for rail collapse/expand and tray detents
     static let panelSpring = Animation.spring(response: 0.38, dampingFraction: 0.88)
 }
 

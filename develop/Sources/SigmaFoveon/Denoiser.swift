@@ -353,7 +353,7 @@ final class FoveonDenoiser: @unchecked Sendable {
             for i in 0..<a.count { p[i] = Float16(v) }
         #endif
         default:
-            // Swift has no Float16 on x86_64; NSNumber boxing covers the rest.
+            // Swift has no Float16 on x86_64
             let boxed = NSNumber(value: v)
             for i in 0..<a.count { a[i] = boxed }
         }

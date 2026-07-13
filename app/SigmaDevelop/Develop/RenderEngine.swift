@@ -23,19 +23,17 @@ struct RenderedImage: @unchecked Sendable {
 final class RenderEngine: @unchecked Sendable {
     private let developer = FoveonDeveloper()
     // The synchronous developer can join its own default-QoS Rust workers.
-    // Matching that QoS avoids priority inversion while the Swift task remains
-    // fully asynchronous and never blocks the main actor.
+    // Matching that QoS avoids priority inversion
     private let queue = DispatchQueue(label: "global.sigma.render", qos: .default)
     /// bound CPU thumbnails as CIRAW proxy decode is GPU bound
     private let thumbnailQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "global.sigma.render.thumbnails"
         #if os(macOS)
-        // Measured (M-series 10-core, 24 X3F proxy decodes + 700px renders):
-        // width 2 → ~66 thumbs/s, width 3 → ~78, flat beyond — the pipeline
-        // knees at 3. Wider only adds memory pressure.
+        // Measured M4
         queue.maxConcurrentOperationCount = 3
         #else
+        // Measured A17
         queue.maxConcurrentOperationCount = 2
         #endif
         queue.qualityOfService = .default
