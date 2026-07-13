@@ -43,13 +43,13 @@ Various industry raw files are also supported, through apple's raw library, & us
 ```
 
 
-Or open `app/` in Xcode & run on an iPhone of choice
-App also builds for Mac Catalyst & iPadOS, but is not the highest priority, use at your own risk, soemthing like that
+Or open `app/` in Xcode & run it — the one target builds natively for
+iPhone, iPad, and macOS (no Catalyst).
 
 ```sh
-./export_app.sh                 # ad-hoc .ipa + .app -> build/export
+./export_app.sh                 # ad-hoc .ipa + native .app -> build/export
 ./export_app.sh --ios           # just the .ipa
-./export_app.sh --catalyst      # just the .app
+./export_app.sh --mac           # just the .app
 ./export_app.sh --method developer-id   # notarizable standalone build
 
 # Ship to TestFlight

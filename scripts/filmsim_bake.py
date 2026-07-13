@@ -59,7 +59,7 @@ REPO = Path(__file__).resolve().parents[1]
 PROFILES = REPO / "resources/spektrafilm-ofx/Resources/data/profiles"
 SPECTRA_LUT = (REPO / "resources/spektrafilm-ofx/Resources/data/luts"
                / "spectral_upsampling/hanatos_irradiance_xy_coeffs_250304.lut")
-OUT = REPO / "develop/Sources/SigmaFoveon/Resources"
+OUT = REPO / "develop/Sources/SigmaFoveon/Assets"
 GEN_SWIFT = REPO / "develop/Sources/SigmaFoveon/FilmStocks.generated.swift"
 
 

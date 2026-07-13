@@ -77,6 +77,30 @@ struct DevelopSettings: Codable, Equatable, Hashable, Sendable {
     var quality: Double = 0.92
     var exportFormat: ExportFormat = .heic
 
+    /// Turn the image by quarter-turns clockwise, normalised to 0…3.
+    mutating func rotate(by quarterTurns: Int) {
+        rotation = (((rotation + quarterTurns) % 4) + 4) % 4
+    }
+
+    /// Keep render combinations valid regardless of whether a change comes
+    /// from an inspector control, keyboard command, or decoded saved state.
+    mutating func setHDREnabled(_ enabled: Bool) {
+        hdr = enabled
+        if enabled { autoTone = true }
+    }
+
+    mutating func selectFilm(_ index: Int) {
+        film = film.selecting(film: index)
+    }
+
+    mutating func repairInvariants(isX3F: Bool) {
+        if hdr { autoTone = true }
+        if !isX3F {
+            denoise = .off
+            lensCorrection = false
+        }
+    }
+
     /// Properties that affect pixels. Export-only fields (`quality`,
     /// `exportFormat`) are intentionally excluded from preview invalidation.
     struct RenderKey: Equatable, Hashable, Sendable {

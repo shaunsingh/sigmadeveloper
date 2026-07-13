@@ -19,7 +19,7 @@ let foveonMetalLibrary: Data? = {
     #else
     let name = "LensCorrection_ios.ci"
     #endif
-    guard let url = Bundle.module.url(forResource: name, withExtension: "metallib", subdirectory: "Resources")
+    guard let url = Bundle.module.url(forResource: name, withExtension: "metallib", subdirectory: "Assets")
         ?? Bundle.module.url(forResource: name, withExtension: "metallib"),
         let data = try? Data(contentsOf: url)
     else {

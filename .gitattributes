@@ -1,0 +1,34 @@
+# Normalize text to LF in the repository and working tree.
+* text=auto eol=lf
+
+# Explicit source and project-file policies.
+*.swift       text eol=lf
+*.rs          text eol=lf
+*.c           text eol=lf
+*.h           text eol=lf
+*.modulemap   text eol=lf
+*.toml        text eol=lf
+*.lock        text eol=lf
+*.json        text eol=lf
+*.md          text eol=lf
+*.sh          text eol=lf
+*.ps1         text eol=lf
+*.py          text eol=lf
+*.applescript text eol=lf
+*.svg         text eol=lf
+*.pbxproj     text eol=lf
+
+# Binary assets must never be line-ending normalized.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.x3f       binary
+*.dng       binary
+*.tiff      binary
+*.tif       binary
+*.metallib  binary
+*.lut       binary
+*.mlmodel   binary
+*.mlmodelc  binary
+*.mlpackage binary
+raw/dist/** binary

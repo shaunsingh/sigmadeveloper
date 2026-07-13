@@ -2,6 +2,12 @@ import SwiftUI
 
 struct LibraryGridView: View {
     @Environment(LibraryStore.self) private var store
+    @Environment(\.developRailActive) private var developRailActive
+    @Environment(\.toggleDevelopRail) private var toggleDevelopRail
+    #if os(macOS)
+    @Environment(WindowCommands.self) private var menuBar
+    @State private var ownsMenuBar = false
+    #endif
 
     @State private var isImporting = false
     @State private var showOptions = false
@@ -10,122 +16,244 @@ struct LibraryGridView: View {
     @State private var isExportingAll = false
     @State private var exportingItemID: UUID?
     @State private var errorText: String?
-    @State private var page: Page? = .gallery
+    #if os(iOS)
+    private enum PhonePage: Hashable { case cover, gallery }
+    /// Native paging position; the gallery is the initial trailing page.
+    @State private var phonePage: PhonePage? = .gallery
+    @State private var viewport: CGSize = .zero
+    private var showCover: Bool { phonePage == .cover }
+    #endif
 
-    private enum Page: Hashable { case gallery, cover }
+    /// Phone compact chrome (cover pager + floating import). Wide layouts use the rail.
+    private var usesPhoneChrome: Bool {
+        #if os(iOS)
+        !viewport.prefersDevelopRail
+        #else
+        false
+        #endif
+    }
 
-    private let columnCount = 2
-    private let columns = [
+    private let phoneColumns = [
         GridItem(.flexible(minimum: 0), spacing: 0),
         GridItem(.flexible(minimum: 0), spacing: 0),
     ]
+    private let wideColumns = [GridItem(.adaptive(minimum: 160), spacing: 0)]
 
     var body: some View {
         content
+            #if os(iOS)
             .sigmaBackground()
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { viewport = $0 }
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(SigmaTheme.paper, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .principal) { SigmaWordmark() }
-                if !store.items.isEmpty, page == .gallery {
-                    ToolbarItem(placement: .topBarLeading) { pageToggle }
-                    ToolbarItem(placement: .topBarTrailing) { menu }
-                }
-            }
+            #else
+            .navigationTitle("Library")
+            #endif
+            #if os(iOS)
+            .toolbar { libraryToolbar }
+            #endif
             .navigationDestination(for: LibraryItem.self) { DetailView(item: $0) }
-            .fileImporter(isPresented: $isImporting,
-                          allowedContentTypes: ImportTypes.content,
-                          allowsMultipleSelection: true) { result in
+            .fileImporter(
+                isPresented: $isImporting,
+                allowedContentTypes: ImportTypes.content,
+                allowsMultipleSelection: true
+            ) { result in
                 if case .success(let urls) = result {
                     Task {
                         await store.importPicked(urls)
-                        withAnimation { page = .gallery }
+                        #if os(iOS)
+                        phonePage = .gallery
+                        #endif
                     }
                 }
             }
             .sheet(isPresented: $showOptions) { DevelopOptionsSheet().environment(store) }
-            .sheet(isPresented: $isSharing) { ShareSheet(items: shareItems) }
+            .exportPresenter(isPresented: $isSharing, items: shareItems) { error in
+                errorText = error.localizedDescription
+            }
             .alert("Export Failed", isPresented: errorBinding) {
                 Button("OK", role: .cancel) { errorText = nil }
             } message: {
                 Text(errorText ?? "")
             }
+            #if os(macOS)
+            .onAppear { ownsMenuBar = true; publishMenuBar() }
+            .onDisappear { ownsMenuBar = false }
+            .onChange(of: store.items.isEmpty) { publishMenuBar() }
+            .onChange(of: store.isImporting) { publishMenuBar() }
+            #endif
+            #if os(iOS)
             .overlay(alignment: .bottom) {
-                if !store.items.isEmpty {
+                if !store.items.isEmpty && usesPhoneChrome {
+                    let hidden = showCover || store.isImporting
                     importButton
-                        .opacity(page == .cover ? 0 : 1)
-                        .allowsHitTesting(page != .cover)
-                        .animation(.easeInOut(duration: 0.2), value: page)
+                        .opacity(hidden ? 0 : 1)
+                        .allowsHitTesting(!hidden)
+                        .animation(.easeInOut(duration: 0.2), value: hidden)
                 }
             }
-            .overlay { if isExporting || store.isImporting { progressOverlay } }
+            #endif
+            // Imports stream in live — a passive chip, never a modal lock.
+            .overlay(alignment: .bottom) {
+                if store.isImporting {
+                    ImportProgressChip()
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                }
+            }
+            .overlay { if isExporting { progressOverlay } }
     }
 
     // MARK: - Pages
 
     @ViewBuilder private var content: some View {
+        #if os(macOS)
+        if store.items.isEmpty {
+            emptyGallery
+        } else {
+            gallery
+        }
+        #else
         if store.items.isEmpty {
             LandingView(hasItems: false) { isImporting = true }
+        } else if usesPhoneChrome {
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 0) {
+                    LandingView(hasItems: true) { isImporting = true }
+                        .containerRelativeFrame(.horizontal)
+                        .id(PhonePage.cover)
+
+                gallery
+                        .containerRelativeFrame(.horizontal)
+                        .id(PhonePage.gallery)
+                }
+                .scrollTargetLayout()
+            }
+            .scrollIndicators(.hidden)
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $phonePage)
+            .defaultScrollAnchor(.trailing)
         } else {
-            pager
+            gallery
         }
+        #endif
     }
 
-    private var pager: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: 0) {
-                LandingView(hasItems: true) { isImporting = true }
-                    .containerRelativeFrame(.horizontal)
-                    .id(Page.cover)
-                gallery
-                    .containerRelativeFrame(.horizontal)
-                    .id(Page.gallery)
-            }
-            .scrollTargetLayout()
+    #if os(macOS)
+    private var emptyGallery: some View {
+        ContentUnavailableView {
+            Label("No Photos", systemImage: "photo.on.rectangle.angled")
+        } description: {
+            Text("Import X3F or RAW files to begin.")
+        } actions: {
+            Button("Import…") { isImporting = true }
+                .buttonStyle(.glassProminent)
+                .keyboardShortcut("i", modifiers: .command)
+                .disabled(store.isImporting)
         }
-        .scrollTargetBehavior(.paging)
-        .scrollPosition(id: $page)
-        .defaultScrollAnchor(.trailing)
-        .scrollIndicators(.hidden)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+    #endif
 
     private var gallery: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 0) {
-                ForEach(Array(store.items.enumerated()), id: \.element.id) { index, item in
-                    GalleryCell(item: item, index: index, columnCount: columnCount,
-                                isExporting: isExporting) { item, format in
+            LazyVGrid(columns: usesPhoneChrome ? phoneColumns : wideColumns, spacing: 0) {
+                ForEach(store.items) { item in
+                    GalleryCell(item: item, isExporting: isExporting) { item, format in
                         Task { await export(item, as: format) }
                     }
                 }
             }
         }
-        .background(SigmaTheme.paper)
         .scrollBounceBehavior(.basedOnSize)
+        #if os(iOS)
+        .background(SigmaTheme.paper)
         .contentMargins(.top, SigmaTheme.contentTopInset, for: .scrollContent)
+        #endif
     }
 
-    // MARK: - Chrome
+    // MARK: - Toolbar
 
-    /// Jumps to the other page in one tap — a deterministic counterpart to the swipe,
-    /// so the cover is reachable (and escapable) without relying on the gesture.
-    private var pageToggle: some View {
+    @ToolbarContentBuilder private var libraryToolbar: some ToolbarContent {
+        #if os(macOS)
+        ToolbarItem(placement: .primaryAction) {
+            Button { isImporting = true } label: {
+                Label("Import", systemImage: "plus")
+            }
+            .disabled(store.isImporting)
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button(action: toggleDevelopRail) {
+                // Stable Label identity — do not swap SF Symbol with state.
+                Label("Develop", systemImage: "sidebar.trailing")
+            }
+            .help(developRailActive ? "Hide Develop" : "Show Develop")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Menu {
+                Button { Task { await runExportAll() } } label: {
+                    Label("Export All", systemImage: "square.and.arrow.up.on.square")
+                }
+                .disabled(store.items.isEmpty || isExporting)
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .disabled(store.items.isEmpty || isExporting)
+        }
+        #else
+        if usesPhoneChrome {
+            ToolbarItem(placement: .principal) { SigmaWordmark() }
+            if !store.items.isEmpty {
+                ToolbarItem(placement: .topBarLeading) { coverToggle }
+                if !showCover {
+                    ToolbarItem(placement: .topBarTrailing) { menu }
+                }
+            }
+        } else if !store.items.isEmpty {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { isImporting = true } label: {
+                    Label("Import", systemImage: "plus")
+                }
+                .tint(SigmaTheme.ink)
+                .disabled(store.isImporting)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: toggleDevelopRail) {
+                    Label("Develop", systemImage: "sidebar.trailing")
+                }
+                .tint(SigmaTheme.ink)
+            }
+            ToolbarItem(placement: .topBarTrailing) { menu }
+        }
+        #endif
+    }
+
+    // MARK: - Phone chrome
+
+    #if os(iOS)
+    /// Jumps between the cover and the gallery in one tap; the count doubles
+    /// as the library badge.
+    private var coverToggle: some View {
         Button {
-            withAnimation { page = (page == .cover) ? .gallery : .cover }
+            withAnimation(.smooth(duration: 0.3)) {
+                phonePage = showCover ? .gallery : .cover
+            }
         } label: {
             Text("\(store.items.count)")
                 .sigmaLabel(size: 11, color: SigmaTheme.ink, tracking: 1.1)
                 .monospacedDigit()
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(page == .cover ? "Show library" : "Show cover")
+        .accessibilityLabel(showCover ? "Show library" : "Show cover")
     }
 
     private var menu: some View {
         Menu {
-            Button { showOptions = true } label: {
-                Label("Develop Options", systemImage: "slider.horizontal.3")
+            if usesPhoneChrome {
+                Button { showOptions = true } label: {
+                    Label("Develop Options", systemImage: "slider.horizontal.3")
+                }
             }
             Button { Task { await runExportAll() } } label: {
                 Label("Export All", systemImage: "square.and.arrow.up.on.square")
@@ -146,13 +274,15 @@ struct LibraryGridView: View {
         }
         .buttonStyle(.glassProminent)
         .tint(SigmaTheme.ink)
+        .disabled(store.isImporting)
         .padding(.bottom, 12)
     }
+    #endif
 
     private var progressOverlay: some View {
         ZStack {
             Color.black.opacity(0.15).ignoresSafeArea()
-            ProgressCard(verb: isExporting ? "Developing" : "Importing")
+            ProgressCard(verb: "Developing")
         }
     }
 
@@ -165,7 +295,24 @@ struct LibraryGridView: View {
 
     private var isExporting: Bool { isExportingAll || exportingItemID != nil }
 
-    // MARK: - Export all
+    #if os(macOS)
+    /// The arriving screen owns the whole menu bar (see `WindowCommands`).
+    private func publishMenuBar() {
+        guard ownsMenuBar else { return }
+        menuBar.backAction = nil
+        menuBar.exportActions = store.items.isEmpty ? [] : [
+            MenuCommand(
+                id: "exportAll",
+                title: "Export All",
+                shortcut: KeyboardShortcut("e", modifiers: [.command, .shift])
+            ) {
+                Task { await runExportAll() }
+            }
+        ]
+    }
+    #endif
+
+    // MARK: - Export
 
     private func runExportAll() async {
         guard !isExporting else { return }
@@ -192,9 +339,9 @@ struct LibraryGridView: View {
     }
 }
 
-// MARK: - Progress card
+// MARK: - Progress
 
-/// Read per-file progress counts in their own body,each tick re-evaluates alone
+/// Read per-file progress counts in their own body; each tick re-evaluates alone.
 private struct ProgressCard: View {
     @Environment(LibraryStore.self) private var store
     let verb: String
@@ -204,7 +351,6 @@ private struct ProgressCard: View {
             ProgressView()
             Text(title)
                 .sigmaText(.subheadline)
-                .foregroundStyle(SigmaTheme.ink)
                 .monospacedDigit()
         }
         .padding(28)
@@ -212,46 +358,66 @@ private struct ProgressCard: View {
     }
 
     private var title: String {
-        guard let progress = store.exportProgress ?? store.importProgress else { return verb }
+        guard let progress = store.exportProgress else { return verb }
         return "\(verb) \(progress.done) of \(progress.total)"
+    }
+}
+
+/// Passive import progress; the grid stays scrollable and tappable while
+/// copies land and thumbnails stream in behind it.
+private struct ImportProgressChip: View {
+    @Environment(LibraryStore.self) private var store
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+            Text(title)
+                .sigmaText(.subheadline)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .glassEffect(in: Capsule())
+        .padding(.bottom, 12)
+    }
+
+    private var title: String {
+        guard let progress = store.importProgress else { return "Importing" }
+        return "Importing \(progress.done) of \(progress.total)"
     }
 }
 
 // MARK: - Gallery cell
 
-/// One grid cell. Reading `store.thumbnails` here — instead of up in
-/// `LibraryGridView.body` — scopes the redraw that each async thumbnail triggers to
-/// the handful of *visible* cells, rather than re-evaluating the whole screen (the
-/// toolbar, overlays and the full item `ForEach`) every time one more thumbnail
-/// finishes decoding.
+/// One grid cell. Reading `store.thumbnails` here scopes redraws to visible cells.
 private struct GalleryCell: View {
     @Environment(LibraryStore.self) private var store
     let item: LibraryItem
-    let index: Int
-    let columnCount: Int
     let isExporting: Bool
     let onExport: (LibraryItem, ExportFormat) -> Void
+
+    private struct ThumbnailTaskKey: Equatable {
+        var missing: Bool
+        var importing: Bool
+    }
 
     var body: some View {
         NavigationLink(value: item) {
             LibraryCard(item: item, thumbnail: store.thumbnails[item.id])
         }
         .buttonStyle(.plain)
-        // Keyed on presence so an LRU-evicted thumbnail is re-requested when it
-        // goes nil while the cell is on screen, not only on first appearance.
-        .task(id: store.thumbnails[item.id] == nil) { store.ensureThumbnail(item) }
-        // Hairline separators drawn per cell (top edge below the first row, leading
-        // edge right of the first column) — no grid-sized background layer that could
-        // seam or flicker while scrolling.
-        .overlay(alignment: .top) {
-            if index >= columnCount {
-                Rectangle().fill(SigmaTheme.hairline).frame(height: 1)
-            }
+        .task(id: ThumbnailTaskKey(
+            missing: store.thumbnails[item.id] == nil,
+            importing: store.isImporting
+        )) {
+            store.ensureThumbnail(item)
         }
-        .overlay(alignment: .leading) {
-            if index % columnCount != 0 {
-                Rectangle().fill(SigmaTheme.hairline).frame(width: 1)
-            }
+        .overlay(alignment: .trailing) {
+            Rectangle().fill(SigmaTheme.hairline).frame(width: 1)
+        }
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(SigmaTheme.hairline).frame(height: 1)
         }
         .contextMenu {
             Button { store.rotate(item, quarterTurns: 1) } label: {
@@ -275,9 +441,10 @@ private struct GalleryCell: View {
             Button(role: .destructive) { store.delete(item) } label: {
                 Label("Delete", systemImage: "trash")
             }
+            .disabled(store.isBeingEdited(item.id))
         } preview: {
             if let thumb = store.thumbnails[item.id] {
-                Image(uiImage: thumb)
+                Image(decorative: thumb, scale: 1)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 320)
@@ -286,8 +453,9 @@ private struct GalleryCell: View {
     }
 }
 
-// MARK: - Landing
+// MARK: - Landing (iPhone cover / empty)
 
+#if os(iOS)
 private struct LandingView: View {
     var hasItems: Bool
     var onImport: () -> Void
@@ -304,10 +472,18 @@ private struct LandingView: View {
                             .foregroundStyle(SigmaTheme.ink)
                         Text("X3F / RAW")
                             .font(.system(size: 11, weight: .medium))
+                            .tracking(1.4)
                             .foregroundStyle(SigmaTheme.secondary)
                     }
                     Button(action: onImport) {
-                        SigmaActionLabel(hasItems ? "+ Import" : "Import")
+                        Text(hasItems ? "+ Import" : "Import")
+                            .font(.system(size: 12, weight: .medium))
+                            .textCase(.uppercase)
+                            .foregroundStyle(SigmaTheme.ink)
+                            .padding(.vertical, 13)
+                            .padding(.horizontal, 30)
+                            .background(SigmaTheme.surface)
+                            .overlay(Rectangle().stroke(SigmaTheme.ink, lineWidth: 0.8))
                     }
                     .buttonStyle(.plain)
                 }
@@ -318,22 +494,4 @@ private struct LandingView: View {
         .ignoresSafeArea(.container, edges: .bottom)
     }
 }
-
-private struct SigmaActionLabel: View {
-    let title: String
-
-    init(_ title: String) {
-        self.title = title
-    }
-
-    var body: some View {
-        Text(title)
-            .font(.system(size: 12, weight: .medium))
-            .textCase(.uppercase)
-            .foregroundStyle(SigmaTheme.ink)
-            .padding(.vertical, 13)
-            .padding(.horizontal, 30)
-            .background(SigmaTheme.surface)
-            .overlay(Rectangle().stroke(SigmaTheme.ink, lineWidth: 0.8))
-    }
-}
+#endif

@@ -22,13 +22,22 @@ struct RenderedImage: @unchecked Sendable {
 /// Bridges SwiftUI to FoveonDeveloper
 final class RenderEngine: @unchecked Sendable {
     private let developer = FoveonDeveloper()
-    // handle QoS properly or else XCode gets made at me
+    // The synchronous developer can join its own default-QoS Rust workers.
+    // Matching that QoS avoids priority inversion while the Swift task remains
+    // fully asynchronous and never blocks the main actor.
     private let queue = DispatchQueue(label: "global.sigma.render", qos: .default)
     /// bound CPU thumbnails as CIRAW proxy decode is GPU bound
     private let thumbnailQueue: OperationQueue = {
         let queue = OperationQueue()
         queue.name = "global.sigma.render.thumbnails"
+        #if os(macOS)
+        // Measured (M-series 10-core, 24 X3F proxy decodes + 700px renders):
+        // width 2 → ~66 thumbs/s, width 3 → ~78, flat beyond — the pipeline
+        // knees at 3. Wider only adds memory pressure.
+        queue.maxConcurrentOperationCount = 3
+        #else
         queue.maxConcurrentOperationCount = 2
+        #endif
         queue.qualityOfService = .default
         return queue
     }()
@@ -99,12 +108,21 @@ final class RenderEngine: @unchecked Sendable {
         }
     }
 
+    /// Let file ingestion own storage and memory bandwidth. Already-executing
+    /// work finishes; queued thumbnails resume when the batch completes.
+    func setThumbnailWorkSuspended(_ suspended: Bool) {
+        thumbnailQueue.isSuspended = suspended
+    }
+
     /// Full-quality on-screen preview honouring settings, downscaled to
     /// `maxDimension` for speed, delivered progressively
     /// Superseded requests are dropped before rendering, so it converges on current
     func previewUpdates(url: URL, settings: DevelopSettings, maxDimension: Int?) -> AsyncThrowingStream<RenderedImage, Error> {
         let generation = previewGeneration.withLock { g in g += 1; return g }
         return AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] _ in
+                self?.cancelPreview(generation)
+            }
             let options = settings.foveonOptions()
             let proxyPreviewed = Self.isProxyPreviewed(url)
 
@@ -189,8 +207,21 @@ final class RenderEngine: @unchecked Sendable {
         }
     }
 
+    /// Invalidate queued or in-flight tile results when the viewport/settings
+    /// no longer need them. Core Image work already encoding on the GPU cannot
+    /// be pre-empted, but its result is dropped before publication.
+    func cancelTiles() {
+        tileGeneration.withLock { $0 &+= 1 }
+    }
+
     private func isCurrentPreview(_ generation: UInt64) -> Bool {
         previewGeneration.withLock { $0 == generation }
+    }
+
+    private func cancelPreview(_ generation: UInt64) {
+        previewGeneration.withLock { current in
+            if current == generation { current &+= 1 }
+        }
     }
 
     private func hasCachedDecode(url: URL, proxy: Bool) -> Bool {

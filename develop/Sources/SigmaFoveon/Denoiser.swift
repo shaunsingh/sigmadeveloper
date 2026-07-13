@@ -339,9 +339,24 @@ final class FoveonDenoiser: @unchecked Sendable {
 
     private func timeArray(for stage: Stage, value: Float) -> MLMultiArray? {
         guard let a = try? MLMultiArray(shape: stage.timeShape, dataType: stage.timeType) else { return nil }
-        // Float16 unavailable on Catalyst
-        let v = NSNumber(value: max(0, min(1, value)))
-        for i in 0..<a.count { a[i] = v }
+        let v = max(0, min(1, value))
+        switch stage.timeType {
+        case .float32:
+            let p = a.dataPointer.bindMemory(to: Float.self, capacity: a.count)
+            for i in 0..<a.count { p[i] = v }
+        case .double:
+            let p = a.dataPointer.bindMemory(to: Double.self, capacity: a.count)
+            for i in 0..<a.count { p[i] = Double(v) }
+        #if arch(arm64)
+        case .float16:
+            let p = a.dataPointer.bindMemory(to: Float16.self, capacity: a.count)
+            for i in 0..<a.count { p[i] = Float16(v) }
+        #endif
+        default:
+            // Swift has no Float16 on x86_64; NSNumber boxing covers the rest.
+            let boxed = NSNumber(value: v)
+            for i in 0..<a.count { a[i] = boxed }
+        }
         return a
     }
 

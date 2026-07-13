@@ -275,7 +275,7 @@ let denoiseMetalLibraryURL: URL? = {
     #else
     let name = "Denoise_ios"
     #endif
-    guard let url = Bundle.module.url(forResource: name, withExtension: "metallib", subdirectory: "Resources")
+    guard let url = Bundle.module.url(forResource: name, withExtension: "metallib", subdirectory: "Assets")
         ?? Bundle.module.url(forResource: name, withExtension: "metallib") else {
         warnStderr("denoise metallib '\(name)' missing")
         return nil

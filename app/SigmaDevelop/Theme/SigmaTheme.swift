@@ -11,7 +11,23 @@ enum SigmaTheme {
     static let stageInsetV: CGFloat = 16
 
     static let contentTopInset: CGFloat = 8
+
+    /// Trailing develop column width on wide iOS layouts.
+    static let developSidebarWidth: CGFloat = 340
+
+    /// Shared spring for rail collapse/expand and tray detents.
+    static let panelSpring = Animation.spring(response: 0.38, dampingFraction: 0.88)
 }
+
+#if os(iOS)
+extension CGSize {
+    /// Pin develop to a trailing rail when there is room for stage + column
+    /// (macOS always hosts develop in the native inspector instead).
+    var prefersDevelopRail: Bool {
+        width >= 640 && width > height
+    }
+}
+#endif
 
 extension View {
     func sigmaLabel(size: CGFloat = 11, color: Color = SigmaTheme.secondary, tracking: CGFloat = 1.3) -> some View {

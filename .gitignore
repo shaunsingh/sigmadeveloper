@@ -1,6 +1,8 @@
 # Build outputs
 target/
 .build/
+.build-ios/
+.build-macos/
 
 # Archive/export outputs
 build/
@@ -36,8 +38,9 @@ testx3f/
 __pycache__/
 *.pyc
 
+# metal
 *.metallib
-!develop/Sources/SigmaFoveon/Resources/*.metallib
+!develop/Sources/SigmaFoveon/Assets/*.metallib
 
 # images
 dataset/

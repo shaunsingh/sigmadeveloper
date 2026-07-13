@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Archive & export SigmaDevelop with your Apple Developer account.
 #
-#   iOS       -> .xcarchive -> .ipa
-#   Catalyst  -> .xcarchive -> .app   (macOS, "Designed for iPad" runtime)
+#   iOS    -> .xcarchive -> .ipa
+#   macOS  -> .xcarchive -> .app   (native, not Catalyst)
 #
 # and, with --upload, ships either straight to TestFlight / App Store Connect.
 #
@@ -13,7 +13,7 @@
 # Examples
 #   ./export_app.sh                         # ad-hoc .ipa + .app into build/export
 #   ./export_app.sh --ios                   # just the .ipa
-#   ./export_app.sh --catalyst              # just the .app
+#   ./export_app.sh --mac                   # just the .app
 #   ./export_app.sh --method developer-id   # notarizable standalone .app / .ipa
 #   ./export_app.sh --upload                # build for the store + push to TestFlight
 #
@@ -32,10 +32,10 @@ team="${TEAM:-47FFZHHXF3}"
 
 # ---- args -------------------------------------------------------------------
 do_ios=1
-do_catalyst=1
+do_mac=1
 picked=0
 method="release-testing"   # iOS: release-testing (ad-hoc) | app-store-connect | debugging
-                           # macOS/Catalyst equivalents: mac-application | app-store-connect |
+                           # macOS equivalents: mac-application | app-store-connect |
                            # debugging | developer-id  (release-testing auto-maps to mac-application)
 upload=0
 outdir="$here/build/export"
@@ -48,9 +48,9 @@ usage() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --ios)       do_ios=1; do_catalyst=0; picked=1 ;;
-        --catalyst)  do_catalyst=1; do_ios=0; picked=1 ;;
-        --both)      do_ios=1; do_catalyst=1; picked=1 ;;
+        --ios)       do_ios=1; do_mac=0; picked=1 ;;
+        --mac|--macos) do_mac=1; do_ios=0; picked=1 ;;
+        --both)      do_ios=1; do_mac=1; picked=1 ;;
         --method)    method="$2"; shift ;;
         --method=*)  method="${1#*=}" ;;
         --upload)    upload=1 ;;
@@ -62,7 +62,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ "$picked" -eq 1 ] || { do_ios=1; do_catalyst=1; }
+[ "$picked" -eq 1 ] || { do_ios=1; do_mac=1; }
 
 if [ "$upload" -eq 1 ]; then
     method="app-store-connect"
@@ -94,14 +94,14 @@ resolve_xcode() {
 dev="$(resolve_xcode)" || { echo "error: full Xcode is required to archive." >&2; exit 1; }
 export DEVELOPER_DIR="$dev"
 
-# ---- prerequisites: rust xcframework (+ Catalyst slice) & metallibs ---------
+# ---- prerequisites: rust xcframework (+ macOS slice) & metallibs ------------
 xcframework="$here/raw/libsd14raw.xcframework"
-have_catalyst_slice() {
-    [ -d "$xcframework" ] && ls "$xcframework" | grep -qi 'maccatalyst'
+have_macos_slice() {
+    [ -d "$xcframework" ] && ls "$xcframework" | grep -qi '^macos'
 }
 if [ "$build_libs" -eq 1 ] \
    || [ ! -d "$xcframework" ] \
-   || { [ "$do_catalyst" -eq 1 ] && ! have_catalyst_slice; }; then
+   || { [ "$do_mac" -eq 1 ] && ! have_macos_slice; }; then
     echo "==> building rust libs / xcframework..." >&2
     "$here/build_ios_libs.sh"
     echo "==> building metal libraries..." >&2
@@ -142,7 +142,7 @@ fi
 # works for both. iOS ad-hoc == macOS "mac-application" (a signed standalone .app).
 resolve_method() {  # $1 = label -> platform-valid method
     local m="$method"
-    if [ "$1" = catalyst ]; then
+    if [ "$1" = mac ]; then
         case "$m" in
             release-testing|ad-hoc|adhoc) m="mac-application" ;;
         esac
@@ -184,8 +184,8 @@ run() {  # $1 = label, $2 = xcodebuild destination
     echo "    -> $exp" >&2
 }
 
-[ "$do_ios" -eq 1 ]      && run ios      "generic/platform=iOS"
-[ "$do_catalyst" -eq 1 ] && run catalyst "generic/platform=macOS,variant=Mac Catalyst"
+[ "$do_ios" -eq 1 ] && run ios "generic/platform=iOS"
+[ "$do_mac" -eq 1 ] && run mac "generic/platform=macOS"
 
 echo "done. artifacts under: $outdir" >&2
 find "$outdir" -maxdepth 3 \( -name '*.ipa' -o -name '*.app' -o -name '*.pkg' \) -print 2>/dev/null || true

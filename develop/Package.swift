@@ -21,7 +21,7 @@ let package = Package(
         .target(
             name: "SigmaFoveon",
             dependencies: ["CFoveonRaw"],
-            resources: [.copy("Resources")],
+            resources: [.copy("Assets")],
             // Use Accelerate's current CBLAS headers.
             swiftSettings: [.unsafeFlags(["-Xcc", "-DACCELERATE_NEW_LAPACK=1"])]
         ),

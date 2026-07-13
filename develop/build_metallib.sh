@@ -14,7 +14,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src="$here/Metal/LensCorrection.ci.metal"
-out="$here/Sources/SigmaFoveon/Resources"
+out="$here/Sources/SigmaFoveon/Assets"
 mkdir -p "$out"
 
 # Resolve a full Xcode (CommandLineTools has no `metal`); mirrors build_ios_libs.sh.

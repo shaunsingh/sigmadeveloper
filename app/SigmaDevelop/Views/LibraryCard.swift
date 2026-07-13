@@ -1,9 +1,8 @@
 import SwiftUI
-import UIKit
 
 struct LibraryCard: View {
     let item: LibraryItem
-    let thumbnail: UIImage?
+    let thumbnail: CGImage?
 
     var body: some View {
         Rectangle()
@@ -12,7 +11,7 @@ struct LibraryCard: View {
             .overlay {
                 if let thumbnail {
                     Color.clear.overlay(alignment: .top) {
-                        Image(uiImage: thumbnail)
+                        Image(decorative: thumbnail, scale: 1)
                             .resizable()
                             .scaledToFill()
                     }

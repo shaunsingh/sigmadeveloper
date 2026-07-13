@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Cross-compile the Rust core (libsd14raw.a) for iOS device + simulator and
-# package the slices as an .xcframework the iOS app links against.
+# Cross-compile the Rust core (libsd14raw.a) for iOS device + simulator +
+# native macOS and package the slices as an .xcframework the app links against.
 #
 # The static library is pure `std` (no system frameworks, no linker step), so a
 # `rustup target add` is all the toolchain it needs - no full iOS SDK dance.
-# The simulator slice is a universal (arm64 + x86_64) fat archive so the app
-# builds on both Apple-silicon and Intel Macs.
+# Universal fat archives cover Apple-silicon and Intel Macs for sim + macOS.
 #
 # Only the final `xcodebuild -create-xcframework` needs full Xcode (not the
 # Command Line Tools), so the script locates an Xcode itself - no global
@@ -18,7 +17,7 @@ out="$here/raw/libsd14raw.xcframework"
 
 device="aarch64-apple-ios"
 sim_targets=("aarch64-apple-ios-sim" "x86_64-apple-ios")
-catalyst_targets=("aarch64-apple-ios-macabi" "x86_64-apple-ios-macabi")
+macos_targets=("aarch64-apple-darwin" "x86_64-apple-darwin")
 
 # Resolve a full Xcode developer dir (not the Command Line Tools instance).
 resolve_xcode() {
@@ -50,8 +49,8 @@ if ! dev="$(resolve_xcode)"; then
     exit 1
 fi
 
-echo "ensuring rust iOS targets..." >&2
-rustup target add "$device" "${sim_targets[@]}" "${catalyst_targets[@]}" >/dev/null
+echo "ensuring rust Apple targets..." >&2
+rustup target add "$device" "${sim_targets[@]}" "${macos_targets[@]}" >/dev/null
 
 build() {
     echo "building libsd14raw.a for ${1}..." >&2
@@ -61,7 +60,7 @@ lib() { echo "$here/raw/target/$1/release/libsd14raw.a"; }
 
 build "$device"
 for target in "${sim_targets[@]}"; do build "$target"; done
-for target in "${catalyst_targets[@]}"; do build "$target"; done
+for target in "${macos_targets[@]}"; do build "$target"; done
 
 # Fuse the two simulator architectures into one fat archive.
 simdir="$here/raw/target/ios-sim-universal/release"
@@ -69,11 +68,11 @@ mkdir -p "$simdir"
 echo "fusing universal simulator slice..." >&2
 lipo -create "$(lib "${sim_targets[0]}")" "$(lib "${sim_targets[1]}")" -output "$simdir/libsd14raw.a"
 
-# Fuse the two Mac Catalyst architectures into one fat archive
-catdir="$here/raw/target/ios-catalyst-universal/release"
-mkdir -p "$catdir"
-echo "fusing universal Mac Catalyst slice..." >&2
-lipo -create "$(lib "${catalyst_targets[0]}")" "$(lib "${catalyst_targets[1]}")" -output "$catdir/libsd14raw.a"
+# Fuse the two macOS architectures into one fat archive
+macdir="$here/raw/target/macos-universal/release"
+mkdir -p "$macdir"
+echo "fusing universal macOS slice..." >&2
+lipo -create "$(lib "${macos_targets[0]}")" "$(lib "${macos_targets[1]}")" -output "$macdir/libsd14raw.a"
 
 echo "packaging ${out} (using Xcode at $dev)..." >&2
 rm -rf "$out"
@@ -82,7 +81,7 @@ rm -rf "$out"
 DEVELOPER_DIR="$dev" xcodebuild -create-xcframework \
     -library "$(lib "$device")" \
     -library "$simdir/libsd14raw.a" \
-    -library "$catdir/libsd14raw.a" \
+    -library "$macdir/libsd14raw.a" \
     -output "$out"
 
 echo "built: $out" >&2

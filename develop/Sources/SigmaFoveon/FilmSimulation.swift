@@ -241,7 +241,7 @@ final class FilmSimulation: @unchecked Sendable {
 
     /// Decode a baked `.lut` into a sampleable texture
     private static func loadLUT(_ name: String, device: MTLDevice) throws -> MTLTexture {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "lut", subdirectory: "Resources")
+        guard let url = Bundle.module.url(forResource: name, withExtension: "lut", subdirectory: "Assets")
             ?? Bundle.module.url(forResource: name, withExtension: "lut") else {
             throw FilmSimError.missingResource("\(name).lut")
         }
@@ -388,7 +388,7 @@ let filmSimMetalLibraryURL: URL? = {
     #else
     let name = "FilmSim_ios"
     #endif
-    guard let url = Bundle.module.url(forResource: name, withExtension: "metallib", subdirectory: "Resources")
+    guard let url = Bundle.module.url(forResource: name, withExtension: "metallib", subdirectory: "Assets")
         ?? Bundle.module.url(forResource: name, withExtension: "metallib") else {
         warnStderr("film simulation metallib '\(name)' missing")
         return nil
